@@ -1,0 +1,6 @@
+{
+  "name": "Vala Commerce",
+  "description": "پلتفرم پیشرفته و یکپارچه تجارت الکترونیک",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
