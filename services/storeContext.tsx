@@ -1,6 +1,7 @@
 'use client';
 
-import React, { createContext, useContext, useState, useMemo } from 'react';
+import React, { createContext, useContext, useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   Product,
   ProductVariant,
@@ -24,6 +25,8 @@ import {
   calculateDiscount,
 } from '../domain/money';
 import { canTransitionOrder } from '../domain/stateMachine';
+import { AppView, pathForView, productIdFromPath, viewForPath } from '../domain/views';
+import { loadPersistedState, savePersistedState } from './persistence';
 import { DEFAULT_FEATURE_FLAGS } from '../domain/features';
 import { PRODUCTS, SHIPPING_METHODS, VALID_COUPONS } from '../data/catalogData';
 import {
@@ -32,23 +35,7 @@ import {
   INITIAL_LEDGER_ENTRIES,
 } from '../data/initialState';
 
-export type AppView =
-  | 'home'
-  | 'catalog'
-  | 'product-detail'
-  | 'cart'
-  | 'checkout'
-  | 'account'
-  // Operations Admin Views
-  | 'admin-dashboard'
-  | 'admin-inventory'
-  | 'admin-orders'
-  | 'admin-ledger'
-  | 'admin-features'
-  // Tier C Enterprise Previews
-  | 'preview-marketplace'
-  | 'preview-b2b'
-  | 'preview-warehouse';
+export type { AppView };
 
 export interface ToastMessage {
   id: string;
@@ -138,10 +125,26 @@ interface StoreContextType {
 const StoreContext = createContext<StoreContextType | null>(null);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
-  // Navigation
-  const [currentView, setCurrentView] = useState<AppView>('home');
-  const [selectedProductId, setSelectedProductId] = useState<ProductId | null>('prod-iphone-16-pro');
+  // Navigation — the URL is the single source of truth for the active view.
+  const router = useRouter();
+  const pathname = usePathname();
+  const currentView = viewForPath(pathname);
+  const initialPathnameRef = useRef(pathname);
+
+  const [selectedProductId, setSelectedProductId] = useState<ProductId | null>(
+    () => productIdFromPath(pathname) ?? 'prod-iphone-16-pro'
+  );
   const [selectedVariantId, setSelectedVariantId] = useState<VariantId | null>('var-iph16p-256-nat');
+
+  // Views are pushed as real routes, so Back/Forward and deep links work.
+  const setCurrentView = useCallback(
+    (view: AppView) => {
+      const target = pathForView(view, productIdFromPath(pathname) ?? selectedProductId);
+      if (target === pathname) return;
+      router.push(target);
+    },
+    [router, pathname, selectedProductId]
+  );
 
   // Products Database
   const [products, setProducts] = useState<Product[]>(PRODUCTS);
@@ -186,6 +189,98 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // Toast
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
+  // --- Persistence -----------------------------------------------------------------
+  // Transactional state is restored once, after hydration, then written back on every
+  // change. Restoring in an effect (never during render) keeps the server-rendered
+  // HTML and the first client render identical, so there is no hydration mismatch.
+  const [hydrated, setHydrated] = useState(false);
+
+  /* eslint-disable react-hooks/set-state-in-effect -- Rehydrating browser-only storage has to
+     happen after the first paint, otherwise the server HTML and the client's first render
+     disagree and React reports a hydration mismatch. The alternative, useSyncExternalStore,
+     would require moving every slice of this provider's state into an external store. */
+  useEffect(() => {
+    const saved = loadPersistedState();
+    const routedProductId = productIdFromPath(initialPathnameRef.current);
+
+    if (saved) {
+      if (saved.products?.length) setProducts(saved.products);
+      if (saved.cart) setCartItemsState(saved.cart);
+      if (saved.activeCoupon !== undefined) setActiveCoupon(saved.activeCoupon);
+      if (saved.orders?.length) setOrders(saved.orders);
+      if (saved.ledgerEntries?.length) setLedgerEntries(saved.ledgerEntries);
+      if (saved.featureFlags) setFeatureFlags(saved.featureFlags);
+      if (saved.wishlistIds) setWishlistIds(saved.wishlistIds);
+      if (saved.comparisonIds) setComparisonIds(saved.comparisonIds);
+      if (saved.customerInfo) setCustomerInfo(saved.customerInfo);
+      if (typeof saved.checkoutStep === 'number') setCheckoutStep(saved.checkoutStep);
+      if (saved.lastCreatedOrder !== undefined) setLastCreatedOrder(saved.lastCreatedOrder);
+
+      const savedAddress = INITIAL_ADDRESSES.find((a) => a.id === saved.selectedAddressId);
+      if (savedAddress) setSelectedAddress(savedAddress);
+      const savedShipping = SHIPPING_METHODS.find((m) => m.id === saved.selectedShippingMethodId);
+      if (savedShipping) setSelectedShippingMethod(savedShipping);
+
+      // The URL owns the product selection: a product route always wins over memory.
+      const catalog = saved.products?.length ? saved.products : PRODUCTS;
+      const productIdToRestore = routedProductId ?? saved.selectedProductId ?? null;
+      const restored = catalog.find((p) => p.id === productIdToRestore);
+      if (restored) {
+        setSelectedProductId(restored.id);
+        setSelectedVariantId(
+          saved.selectedVariantId && restored.variants.some((v) => v.id === saved.selectedVariantId)
+            ? saved.selectedVariantId
+            : restored.variants[0]?.id ?? null
+        );
+      }
+    }
+
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    savePersistedState({
+      version: 1,
+      products,
+      cart: cartItemsState,
+      activeCoupon,
+      orders,
+      ledgerEntries,
+      featureFlags,
+      wishlistIds,
+      comparisonIds,
+      selectedAddressId: selectedAddress.id,
+      selectedShippingMethodId: selectedShippingMethod.id,
+      customerInfo,
+      checkoutStep,
+      lastCreatedOrder,
+      selectedProductId,
+      selectedVariantId,
+    });
+  }, [
+    hydrated,
+    products,
+    cartItemsState,
+    activeCoupon,
+    orders,
+    ledgerEntries,
+    featureFlags,
+    wishlistIds,
+    comparisonIds,
+    selectedAddress,
+    selectedShippingMethod,
+    customerInfo,
+    checkoutStep,
+    lastCreatedOrder,
+    selectedProductId,
+    selectedVariantId,
+  ]);
+
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ---------------------------------------------------------------------------------
+
   const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
     const id = Math.random().toString(36).substring(2, 9);
     setToasts((prev) => [...prev, { id, text, type }]);
@@ -200,8 +295,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     if (prod && prod.variants.length > 0) {
       setSelectedVariantId(variantId || prod.variants[0].id);
     }
-    setCurrentView('product-detail');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    router.push(pathForView('product-detail', productId));
   };
 
   // Filtered Products Memo

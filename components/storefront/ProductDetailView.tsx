@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { useStore } from '../../services/storeContext';
+import { productIdFromPath } from '../../domain/views';
 import { formatMoney, subtractMoney } from '../../domain/money';
 import { ProductCard } from './ProductCard';
 import {
@@ -33,7 +35,11 @@ export function ProductDetailView() {
     comparisonIds,
   } = useStore();
 
-  const product = products.find((p) => p.id === selectedProductId) || products[0];
+  // The URL is the source of truth for a deep link, Back/Forward or a shared product link;
+  // selectedProductId is only the fallback for a selection made off a product route.
+  const routedProductId = productIdFromPath(usePathname());
+  const product =
+    products.find((p) => p.id === (routedProductId ?? selectedProductId)) || products[0];
 
   // Active variant state
   const [activeVariantId, setActiveVariantId] = useState(
